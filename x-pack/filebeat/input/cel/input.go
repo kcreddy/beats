@@ -41,6 +41,7 @@ import (
 	inputcursor "github.com/elastic/beats/v7/filebeat/input/v2/input-cursor"
 	"github.com/elastic/beats/v7/libbeat/beat"
 	"github.com/elastic/beats/v7/libbeat/feature"
+	"github.com/elastic/beats/v7/libbeat/monitoring/inputmon"
 	"github.com/elastic/beats/v7/libbeat/version"
 	"github.com/elastic/beats/v7/x-pack/filebeat/input/internal/httplog"
 	"github.com/elastic/elastic-agent-libs/logp"
@@ -104,7 +105,7 @@ func (input) run(env v2.Context, src *source, cursor map[string]interface{}, pub
 	cfg := src.cfg
 	log := env.Logger.With("input_url", cfg.Resource.URL)
 
-	metrics := newInputMetrics(monitoring.GetNamespace("dataset").GetRegistry(), env.ID)
+	metrics := newInputMetrics(env.ID)
 	defer metrics.Close()
 
 	ctx := ctxtool.FromCanceller(env.Cancelation)
@@ -121,7 +122,7 @@ func (input) run(env v2.Context, src *source, cursor map[string]interface{}, pub
 		return err
 	}
 
-	prg, err := newProgram(cfg.Program, root, client, limiter, patterns)
+	prg, err := newProgram(ctx, cfg.Program, root, client, limiter, patterns)
 	if err != nil {
 		return err
 	}
@@ -176,18 +177,21 @@ func (input) run(env v2.Context, src *source, cursor map[string]interface{}, pub
 		log.Info("process repeated request")
 		var waitUntil time.Time
 		for {
-			// We have a special-case wait for when we have a zero limit.
-			// x/time/rate allow a burst through even when the limit is zero
-			// so in order to ensure that we don't try until we are out of
-			// purgatory we calculate how long we should wait according to
-			// the retry after for a 429 and rate limit headers if we have
-			// a zero rate quota. See handleResponse below.
 			if wait := time.Until(waitUntil); wait > 0 {
+				// We have a special-case wait for when we have a zero limit.
+				// x/time/rate allow a burst through even when the limit is zero
+				// so in order to ensure that we don't try until we are out of
+				// purgatory we calculate how long we should wait according to
+				// the retry after for a 429 and rate limit headers if we have
+				// a zero rate quota. See handleResponse below.
 				select {
 				case <-ctx.Done():
 					return ctx.Err()
 				case <-time.After(wait):
 				}
+			} else if err = ctx.Err(); err != nil {
+				// Otherwise exit if we have been cancelled.
+				return err
 			}
 
 			// Process a set of event requests.
@@ -804,7 +808,7 @@ var (
 	}
 )
 
-func newProgram(src, root string, client *http.Client, limiter *rate.Limiter, patterns map[string]*regexp.Regexp) (cel.Program, error) {
+func newProgram(ctx context.Context, src, root string, client *http.Client, limiter *rate.Limiter, patterns map[string]*regexp.Regexp) (cel.Program, error) {
 	opts := []cel.EnvOption{
 		cel.Declarations(decls.NewVar(root, decls.Dyn)),
 		lib.Collections(),
@@ -821,7 +825,7 @@ func newProgram(src, root string, client *http.Client, limiter *rate.Limiter, pa
 		}),
 	}
 	if client != nil {
-		opts = append(opts, lib.HTTP(client, limiter))
+		opts = append(opts, lib.HTTPWithContext(ctx, client, limiter))
 	}
 	if len(patterns) != 0 {
 		opts = append(opts, lib.Regexp(patterns))
@@ -845,14 +849,12 @@ func newProgram(src, root string, client *http.Client, limiter *rate.Limiter, pa
 
 func evalWith(ctx context.Context, prg cel.Program, input map[string]interface{}) (map[string]interface{}, error) {
 	out, _, err := prg.ContextEval(ctx, input)
+	if e := ctx.Err(); e != nil {
+		err = e
+	}
 	if err != nil {
 		input["events"] = map[string]interface{}{"error.message": fmt.Sprintf("failed eval: %v", err)}
 		return input, fmt.Errorf("failed eval: %w", err)
-	}
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	default:
 	}
 
 	v, err := out.ConvertToNative(reflect.TypeOf(&structpb.Value{}))
@@ -908,8 +910,7 @@ func test(url *url.URL) error {
 
 // inputMetrics handles the input's metric reporting.
 type inputMetrics struct {
-	id     string
-	parent *monitoring.Registry
+	unregister func()
 
 	resource            *monitoring.String // URL-ish of input resource
 	executions          *monitoring.Uint   // times the CEL program has been executed
@@ -921,13 +922,10 @@ type inputMetrics struct {
 	batchProcessingTime metrics.Sample     // histogram of the elapsed successful batch processing times in nanoseconds (time of receipt to time of ACK for non-empty batches).
 }
 
-func newInputMetrics(parent *monitoring.Registry, id string) *inputMetrics {
-	reg := parent.NewRegistry(id)
-	monitoring.NewString(reg, "input").Set(inputName)
-	monitoring.NewString(reg, "id").Set(id)
+func newInputMetrics(id string) *inputMetrics {
+	reg, unreg := inputmon.NewInputRegistry(inputName, id, nil)
 	out := &inputMetrics{
-		id:                  id,
-		parent:              reg,
+		unregister:          unreg,
 		resource:            monitoring.NewString(reg, "resource"),
 		executions:          monitoring.NewUint(reg, "cel_executions"),
 		batchesReceived:     monitoring.NewUint(reg, "batches_received_total"),
@@ -946,5 +944,5 @@ func newInputMetrics(parent *monitoring.Registry, id string) *inputMetrics {
 }
 
 func (m *inputMetrics) Close() {
-	m.parent.Remove(m.id)
+	m.unregister()
 }
