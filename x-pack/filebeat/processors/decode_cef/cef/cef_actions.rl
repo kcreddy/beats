@@ -15,6 +15,12 @@
     action mark_escape {
         state.pushEscape(mark_slash, p)
     }
+    action mark_brace_start {
+        state.braceStarts++
+    }
+    action mark_brace_end {
+        state.braceStarts--
+    }
     action version {
         e.Version, _ = strconv.Atoi(data[mark:p])
     }
@@ -76,9 +82,18 @@
         }
     }
     action extension_err {
-        recoveredErrs = append(recoveredErrs, fmt.Errorf("malformed value for %s at pos %d", state.key, p+1))
-        fhold; fnext gobble_extension;
+        if (string(data[p]) == "=") {
+            fmt.Printf("p: %d | data[p]: %s", p, string(data[p]))
+            if state.braceStarts <= 0 {
+                recoveredErrs = append(recoveredErrs, fmt.Errorf("malformed value for %s at pos %d", state.key, p+1))
+                fhold; fnext gobble_extension;
+            }
+        } else {
+            recoveredErrs = append(recoveredErrs, fmt.Errorf("malformed value for %s at pos %d", state.key, p+1))
+            fhold; fnext gobble_extension;
+        }
     }
+
     action recover_next_extension {
         state.reset()
         // Resume processing at p, the start of the next extension key.

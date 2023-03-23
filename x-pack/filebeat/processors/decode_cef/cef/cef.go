@@ -108,7 +108,7 @@ func (e *Event) pushExtension(key, value string) {
 //
 // The CEF message consists of a header followed by a series of key-value pairs.
 //
-//    CEF:Version|Device Vendor|Device Product|Device Version|Device Event Class ID|Name|Severity|[Extension]
+//	CEF:Version|Device Vendor|Device Product|Device Version|Device Event Class ID|Name|Severity|[Extension]
 //
 // The header is a series of pipe delimited values. If a pipe (|) is used in a
 // header value, it has to be escaped with a backslash (\). If a backslash is
@@ -216,10 +216,11 @@ func replaceEscapes(v string, startOffset int, escapes []escapePosition) string 
 }
 
 type cefState struct {
-	key        string           // Extension key.
-	valueStart int              // Start index of extension value.
-	valueEnd   int              // End index of extension value.
-	escapes    []escapePosition // Array of escapes indices within the current value.
+	key         string           // Extension key.
+	valueStart  int              // Start index of extension value.
+	valueEnd    int              // End index of extension value.
+	escapes     []escapePosition // Array of escapes indices within the current value.
+	braceStarts int              // Number of open braces in a json value i.e, number of {.
 }
 
 func (s *cefState) reset() {
@@ -227,6 +228,7 @@ func (s *cefState) reset() {
 	s.valueStart = 0
 	s.valueEnd = 0
 	s.escapes = s.escapes[:0]
+	s.braceStarts = 0
 }
 
 func (s *cefState) pushEscape(start, end int) {

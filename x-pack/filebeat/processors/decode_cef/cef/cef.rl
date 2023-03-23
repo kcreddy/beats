@@ -25,6 +25,8 @@
 
     # Define what extension characters are allowed.
     equal = "=";
+    brace_start = "{";
+    brace_end = "}";
     escape_equal = escape equal;
     escape_newline = escape 'n';
     escape_carriage_return = escape 'r';
@@ -34,7 +36,11 @@
     extension_key_start_chars = alnum | '_';
     extension_key_chars = extension_key_start_chars | '.' | ',' | '[' | ']';
     extension_key_pattern = extension_key_start_chars extension_key_chars*;
-    extension_value_chars_nospace = extension_value_escapes | (any -- equal -- escape -- space);
+    # extension_value_chars_nospace = extension_value_escapes | (any -- equal -- escape -- space);
+    extension_value_brace_start = brace_start %mark_brace_start;
+    extension_value_brace_end = brace_end %mark_brace_end;
+    extension_value_chars_nospace = extension_value_escapes | extension_value_brace_start | extension_value_brace_end | (any -- equal -- escape -- space -- brace_start -- brace_end);
+    
 
     # Extension fields.
     extension_key = extension_key_pattern >mark %extension_key;

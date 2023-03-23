@@ -44,6 +44,8 @@ const (
 
 	malformedExtensionEscape = `CEF:0|FooBar|Web Gateway|1.2.3.45.67|200|Success|2|rt=Sep 07 2018 14:50:39 cat=Access Log dst=1.1.1.1 dhost=foo.example.com suser=redacted src=2.2.2.2 requestMethod=POST request='https://foo.example.com/bar/bingo/1' requestClientApplication='Foo-Bar/2018.1.7; =Email:user@example.com; Guid:test=' cs1= cs1Label=Foo Bar`
 
+	jsonFieldsWithIn = `CEF:0|FooBar|Web Gateway|1.2.3.45.67|200|Success|2|rt=Sep 07 2018 14:50:39 cat=Access Log dst=1.1.1.1 dhost=foo.example.com suser=redacted src=2.2.2.2 requestMethod=POST request='https://foo.example.com/bar/bingo/1' httpTrans={"http_req": {"body_len": 0, "headers": {"accept-language": "de,de-DE;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6", "accept-encoding": "gzip, deflate, br", "connection": "Keep-Alive", "accept": "*/*", "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36 Edg/110.0.1587.46", "host": "[p.visitorqueue.com](https://p.visitorqueue.com/)", "referer": "https://product.tdk.com/"}, "host": "[p.visitorqueue.com](https://p.visitorqueue.com/)", "version": "1.1", "path": "ga_user_id", "scheme": "https", "method": "GET"}, "ver": "1.1", "http_response": {"body_len": 36, "headers": {"connection": "Keep-Alive", "true-file-type": "18", "content-type": "text/plain", "content-length": "36"}, "version": "1.1", "status_code": 200}} cs1= cs1Label=Foo Bar`
+
 	multipleMalformedExtensionValues = `CEF:0|vendor|product|version|event_id|name|Very-High| msg=Hello World error=Failed because id==old_id user=root angle=106.7<=180`
 
 	paddedMessage = `CEF:0|security|threatmanager|1.0|100|message is padded|10|spt=1232 msg=Trailing space in non-final extensions is  preserved    src=10.0.0.192 `
@@ -78,6 +80,7 @@ var testMessages = []string{
 	equalsInMessage,
 	escapesInExtension,
 	malformedExtensionEscape,
+	jsonFieldsWithIn,
 	multipleMalformedExtensionValues,
 	paddedMessage,
 	crlfMessage,
@@ -322,6 +325,36 @@ func TestEventUnpack(t *testing.T) {
 		// equals sign.
 		if assert.Error(t, err) {
 			assert.Contains(t, err.Error(), "requestClientApplication")
+		}
+	})
+
+	t.Run("errorJsonFieldsWithIn", func(t *testing.T) {
+		var e Event
+		err := e.Unpack(jsonFieldsWithIn)
+		assert.Equal(t, 0, e.Version)
+		assert.Equal(t, "FooBar", e.DeviceVendor)
+		assert.Equal(t, "Web Gateway", e.DeviceProduct)
+		assert.Equal(t, "1.2.3.45.67", e.DeviceVersion)
+		assert.Equal(t, "200", e.DeviceEventClassID)
+		assert.Equal(t, "Success", e.Name)
+		assert.Equal(t, "2", e.Severity)
+		assert.Equal(t, map[string]*Field{
+			"rt":            TimestampField("Sep 07 2018 14:50:39"),
+			"cat":           StringField("Access Log"),
+			"dst":           IPField("1.1.1.1"),
+			"dhost":         StringField("foo.example.com"),
+			"suser":         StringField("redacted"),
+			"src":           IPField("2.2.2.2"),
+			"requestMethod": StringField("POST"),
+			"request":       StringField(`'https://foo.example.com/bar/bingo/1'`),
+			"cs1":           StringField(""),
+			"cs1Label":      StringField("Foo Bar"),
+		}, e.Extensions)
+
+		// httpTrans is not valid because it contains an unescaped
+		// equals sign.
+		if assert.Error(t, err) {
+			assert.Contains(t, err.Error(), "httpTrans")
 		}
 	})
 
