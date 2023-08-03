@@ -79,8 +79,6 @@ func gcsObjectHash(src *Source, object *storage.ObjectAttrs) string {
 	return hex.EncodeToString(h.Sum(nil)[:5])
 }
 
-const jobErrString = "job with jobId %s encountered an error : %w"
-
 func (j *job) do(ctx context.Context, id string) {
 	var fields mapstr.M
 
@@ -94,7 +92,7 @@ func (j *job) do(ctx context.Context, id string) {
 		err := j.processAndPublishData(ctx, id)
 		if err != nil {
 			j.state.updateFailedJobs(j.object.Name)
-			j.log.Errorf(jobErrString, id, err)
+			j.log.Errorw("job encountered an error", "gcs.jobId", id, "error", err)
 			return
 		}
 
@@ -102,19 +100,19 @@ func (j *job) do(ctx context.Context, id string) {
 		err := fmt.Errorf("job with jobId %s encountered an error: content-type %s not supported", id, j.object.ContentType)
 		fields = mapstr.M{
 			"message": err.Error(),
-			"event": mapstr.M{
-				"kind": "publish_error",
-			},
 		}
 		event := beat.Event{
 			Timestamp: time.Now(),
 			Fields:    fields,
 		}
 		event.SetID(objectID(j.hash, 0))
-		j.state.save(j.object.Name, j.object.Updated)
-		if err := j.publisher.Publish(event, j.state.checkpoint()); err != nil {
-			j.log.Errorf(jobErrString, id, err)
+		// locks while data is being saved and published to avoid concurrent map read/writes
+		cp, done := j.state.saveForTx(j.object.Name, j.object.Updated)
+		if err := j.publisher.Publish(event, cp); err != nil {
+			j.log.Errorw("job encountered an error", "gcs.jobId", id, "error", err)
 		}
+		// unlocks after data is saved and published
+		done()
 	}
 }
 
@@ -148,7 +146,7 @@ func (j *job) processAndPublishData(ctx context.Context, id string) error {
 	defer func() {
 		err = reader.Close()
 		if err != nil {
-			j.log.Errorf("failed to close reader for object: %s, with error: %w", j.object.Name, err)
+			j.log.Errorw("failed to close reader for object", "objectName", j.object.Name, "error", err)
 		}
 	}()
 
@@ -208,23 +206,30 @@ func (j *job) readJsonAndPublish(ctx context.Context, r io.Reader, id string) er
 		if j.src.ParseJSON {
 			parsedData, err = decodeJSON(bytes.NewReader(item))
 			if err != nil {
-				j.log.Errorf(jobErrString, id, err)
+				j.log.Errorw("job encountered an error", "gcs.jobId", id, "error", err)
 			}
 		}
 		evt := j.createEvent(item, parsedData, offset+relativeOffset)
 		// updates the offset after reading the file
 		// this avoids duplicates for the last read when resuming operation
 		offset = dec.InputOffset()
+		// locks while data is being saved and published to avoid concurrent map read/writes
+		var (
+			done func()
+			cp   *Checkpoint
+		)
 		if !dec.More() {
 			// if this is the last object, then peform a complete state save
-			j.state.save(j.object.Name, j.object.Updated)
+			cp, done = j.state.saveForTx(j.object.Name, j.object.Updated)
 		} else {
 			// partially saves read state using offset
-			j.state.savePartial(j.object.Name, offset+relativeOffset)
+			cp, done = j.state.savePartialForTx(j.object.Name, offset+relativeOffset)
 		}
-		if err := j.publisher.Publish(evt, j.state.checkpoint()); err != nil {
-			j.log.Errorf(jobErrString, id, err)
+		if err := j.publisher.Publish(evt, cp); err != nil {
+			j.log.Errorw("job encountered an error", "gcs.jobId", id, "error", err)
 		}
+		// unlocks after data is saved and published
+		done()
 	}
 	return nil
 }
@@ -318,11 +323,6 @@ func (j *job) createEvent(message []byte, data []mapstr.M, offset int64) beat.Ev
 				Provider string `json:"provider"`
 			}{
 				Provider: "google cloud",
-			},
-			"event": struct {
-				Kind string `json:"kind"`
-			}{
-				Kind: "publish_data",
 			},
 		},
 	}

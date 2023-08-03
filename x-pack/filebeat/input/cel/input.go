@@ -4,20 +4,19 @@
 
 // Package cel implements an input that uses the Common Expression Language to
 // perform requests and do endpoint processing of events. The cel package exposes
-// the github.com/elastic/mito/lib and github.com/google/cel-go/ext CEL extension
-// libraries.
+// the github.com/elastic/mito/lib CEL extension library.
 package cel
 
 import (
 	"compress/gzip"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"strconv"
@@ -33,8 +32,6 @@ import (
 
 	"github.com/google/cel-go/cel"
 	"github.com/google/cel-go/checker/decls"
-	"google.golang.org/protobuf/encoding/protojson"
-	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/structpb"
 
 	v2 "github.com/elastic/beats/v7/filebeat/input/v2"
@@ -71,12 +68,22 @@ var userAgent = useragent.UserAgent("Filebeat", version.GetDefaultVersion(), ver
 func Plugin(log *logp.Logger, store inputcursor.StateStore) v2.Plugin {
 	return v2.Plugin{
 		Name:      inputName,
-		Stability: feature.Experimental,
+		Stability: feature.Stable,
 		Manager:   NewInputManager(log, store),
 	}
 }
 
-type input struct{}
+type input struct {
+	time func() time.Time
+}
+
+// now is time.Now with a modifiable time source.
+func (i input) now() time.Time {
+	if i.time == nil {
+		return time.Now()
+	}
+	return i.time()
+}
 
 func (input) Name() string { return inputName }
 
@@ -101,7 +108,16 @@ func (input) Run(env v2.Context, src inputcursor.Source, crsr inputcursor.Cursor
 	return input{}.run(env, src.(*source), cursor, pub)
 }
 
-func (input) run(env v2.Context, src *source, cursor map[string]interface{}, pub inputcursor.Publisher) error {
+// sanitizeFileName returns name with ":" and "/" replaced with "_", removing repeated instances.
+// The request.tracer.filename may have ":" when a httpjson input has cursor config and
+// the macOS Finder will treat this as path-separator and causes to show up strange filepaths.
+func sanitizeFileName(name string) string {
+	name = strings.ReplaceAll(name, ":", string(filepath.Separator))
+	name = filepath.Clean(name)
+	return strings.ReplaceAll(name, string(filepath.Separator), "_")
+}
+
+func (i input) run(env v2.Context, src *source, cursor map[string]interface{}, pub inputcursor.Publisher) error {
 	cfg := src.cfg
 	log := env.Logger.With("input_url", cfg.Resource.URL)
 
@@ -109,6 +125,11 @@ func (input) run(env v2.Context, src *source, cursor map[string]interface{}, pub
 	defer metrics.Close()
 
 	ctx := ctxtool.FromCanceller(env.Cancelation)
+
+	if cfg.Resource.Tracer != nil {
+		id := sanitizeFileName(env.ID)
+		cfg.Resource.Tracer.Filename = strings.ReplaceAll(cfg.Resource.Tracer.Filename, "*", id)
+	}
 
 	client, err := newClient(ctx, cfg, log)
 	if err != nil {
@@ -122,7 +143,14 @@ func (input) run(env v2.Context, src *source, cursor map[string]interface{}, pub
 		return err
 	}
 
-	prg, err := newProgram(ctx, cfg.Program, root, client, limiter, patterns)
+	var auth *lib.BasicAuth
+	if cfg.Auth.Basic.isEnabled() {
+		auth = &lib.BasicAuth{
+			Username: cfg.Auth.Basic.User,
+			Password: cfg.Auth.Basic.Password,
+		}
+	}
+	prg, err := newProgram(ctx, cfg.Program, root, client, limiter, auth, patterns, cfg.XSDs)
 	if err != nil {
 		return err
 	}
@@ -175,7 +203,10 @@ func (input) run(env v2.Context, src *source, cursor map[string]interface{}, pub
 	// in requests.
 	err = periodically(ctx, cfg.Interval, func() error {
 		log.Info("process repeated request")
-		var waitUntil time.Time
+		var (
+			budget    = *cfg.MaxExecutions
+			waitUntil time.Time
+		)
 		for {
 			if wait := time.Until(waitUntil); wait > 0 {
 				// We have a special-case wait for when we have a zero limit.
@@ -195,11 +226,11 @@ func (input) run(env v2.Context, src *source, cursor map[string]interface{}, pub
 			}
 
 			// Process a set of event requests.
-			log.Debugw("request state", logp.Namespace("cel"), "state", state)
+			log.Debugw("request state", logp.Namespace("cel"), "state", redactor{state: state, mask: cfg.Redact.Fields, delete: cfg.Redact.Delete})
 			metrics.executions.Add(1)
-			start := time.Now()
-			state, err = evalWith(ctx, prg, state)
-			log.Debugw("response state", logp.Namespace("cel"), "state", state)
+			start := i.now()
+			state, err = evalWith(ctx, prg, state, start)
+			log.Debugw("response state", logp.Namespace("cel"), "state", redactor{state: state, mask: cfg.Redact.Fields, delete: cfg.Redact.Delete})
 			if err != nil {
 				switch {
 				case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
@@ -428,6 +459,13 @@ func (input) run(env v2.Context, src *source, cursor map[string]interface{}, pub
 			if more, _ := state["want_more"].(bool); !more {
 				return nil
 			}
+
+			// Check we have a remaining execution budget.
+			budget--
+			if budget <= 0 {
+				log.Warnw("exceeding maximum number of CEL executions", "limit", *cfg.MaxExecutions)
+				return nil
+			}
 		}
 	})
 	switch {
@@ -652,6 +690,11 @@ func newClient(ctx context.Context, cfg config, log *logp.Logger) (*http.Client,
 
 	if cfg.Resource.Tracer != nil {
 		w := zapcore.AddSync(cfg.Resource.Tracer)
+		go func() {
+			// Close the logger when we are done.
+			<-ctx.Done()
+			cfg.Resource.Tracer.Close()
+		}()
 		core := ecszap.NewCore(
 			ecszap.NewDefaultEncoderConfig(),
 			w,
@@ -796,9 +839,19 @@ func regexpsFromConfig(cfg config) (map[string]*regexp.Regexp, error) {
 var (
 	// mimetypes holds supported MIME type mappings.
 	mimetypes = map[string]interface{}{
-		"application/gzip":     func(r io.Reader) (io.Reader, error) { return gzip.NewReader(r) },
-		"application/x-ndjson": lib.NDJSON,
-		"application/zip":      lib.Zip,
+		"application/gzip":         func(r io.Reader) (io.Reader, error) { return gzip.NewReader(r) },
+		"application/x-ndjson":     lib.NDJSON,
+		"application/zip":          lib.Zip,
+		"text/csv; header=absent":  lib.CSVNoHeader,
+		"text/csv; header=present": lib.CSVHeader,
+
+		// Include the undocumented space-less syntax to head off typo-related
+		// user issues.
+		//
+		// TODO: Consider changing the MIME type look-ups to a formal parser
+		// rather than a simple map look-up.
+		"text/csv;header=absent":  lib.CSVNoHeader,
+		"text/csv;header=present": lib.CSVHeader,
 	}
 
 	// limitPolicies are the provided rate limit policy helpers.
@@ -808,12 +861,18 @@ var (
 	}
 )
 
-func newProgram(ctx context.Context, src, root string, client *http.Client, limiter *rate.Limiter, patterns map[string]*regexp.Regexp) (cel.Program, error) {
+func newProgram(ctx context.Context, src, root string, client *http.Client, limiter *rate.Limiter, auth *lib.BasicAuth, patterns map[string]*regexp.Regexp, xsd map[string]string) (cel.Program, error) {
+	xml, err := lib.XML(nil, xsd)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build xml type hints: %w", err)
+	}
 	opts := []cel.EnvOption{
 		cel.Declarations(decls.NewVar(root, decls.Dyn)),
 		lib.Collections(),
 		lib.Crypto(),
 		lib.JSON(nil),
+		xml,
+		lib.Strings(),
 		lib.Time(),
 		lib.Try(),
 		lib.File(mimetypes),
@@ -825,7 +884,7 @@ func newProgram(ctx context.Context, src, root string, client *http.Client, limi
 		}),
 	}
 	if client != nil {
-		opts = append(opts, lib.HTTPWithContext(ctx, client, limiter))
+		opts = append(opts, lib.HTTPWithContext(ctx, client, limiter, auth))
 	}
 	if len(patterns) != 0 {
 		opts = append(opts, lib.Regexp(patterns))
@@ -847,8 +906,20 @@ func newProgram(ctx context.Context, src, root string, client *http.Client, limi
 	return prg, nil
 }
 
-func evalWith(ctx context.Context, prg cel.Program, state map[string]interface{}) (map[string]interface{}, error) {
-	out, _, err := prg.ContextEval(ctx, map[string]interface{}{root: state})
+func evalWith(ctx context.Context, prg cel.Program, state map[string]interface{}, now time.Time) (map[string]interface{}, error) {
+	out, _, err := prg.ContextEval(ctx, map[string]interface{}{
+		// Replace global program "now" with current time. This is necessary
+		// as the lib.Time now global is static at program instantiation time
+		// which will persist over multiple evaluations. The lib.Time behaviour
+		// is correct for mito where CEL program instances live for only a
+		// single evaluation. Rather than incurring the cost of creating a new
+		// cel.Program for each evaluation, shadow lib.Time's now with a new
+		// value for each eval. We retain the lib.Time now global for
+		// compatibility between CEL programs developed in mito with programs
+		// run in the input.
+		"now": now,
+		root:  state,
+	})
 	if e := ctx.Err(); e != nil {
 		err = e
 	}
@@ -857,23 +928,20 @@ func evalWith(ctx context.Context, prg cel.Program, state map[string]interface{}
 		return state, fmt.Errorf("failed eval: %w", err)
 	}
 
-	v, err := out.ConvertToNative(reflect.TypeOf(&structpb.Value{}))
+	v, err := out.ConvertToNative(reflect.TypeOf((*structpb.Struct)(nil)))
 	if err != nil {
 		state["events"] = errorMessage(fmt.Sprintf("failed proto conversion: %v", err))
 		return state, fmt.Errorf("failed proto conversion: %w", err)
 	}
-	b, err := protojson.MarshalOptions{Indent: ""}.Marshal(v.(proto.Message))
-	if err != nil {
-		state["events"] = errorMessage(fmt.Sprintf("failed native conversion: %v", err))
-		return state, fmt.Errorf("failed native conversion: %w", err)
+	switch v := v.(type) {
+	case *structpb.Struct:
+		return v.AsMap(), nil
+	default:
+		// This should never happen.
+		errMsg := fmt.Sprintf("unexpected native conversion type: %T", v)
+		state["events"] = errorMessage(errMsg)
+		return state, errors.New(errMsg)
 	}
-	var res map[string]interface{}
-	err = json.Unmarshal(b, &res)
-	if err != nil {
-		state["events"] = errorMessage(fmt.Sprintf("failed json conversion: %v", err))
-		return state, fmt.Errorf("failed json conversion: %w", err)
-	}
-	return res, nil
 }
 
 func errorMessage(msg string) map[string]interface{} {
@@ -949,4 +1017,105 @@ func newInputMetrics(id string) *inputMetrics {
 
 func (m *inputMetrics) Close() {
 	m.unregister()
+}
+
+// redactor implements lazy field redaction of sets of a mapstr.M.
+type redactor struct {
+	state  mapstr.M
+	mask   []string // mask is the set of dotted paths to redact from state.
+	delete bool     // if delete is true, delete redacted fields instead of showing a redaction.
+}
+
+// String renders the JSON corresponding to r.state after applying redaction
+// operations.
+func (r redactor) String() string {
+	if len(r.mask) == 0 {
+		return r.state.String()
+	}
+	c := make(mapstr.M, len(r.state))
+	cloneMap(c, r.state)
+	for _, mask := range r.mask {
+		if r.delete {
+			walkMap(c, mask, func(parent mapstr.M, key string) {
+				delete(parent, key)
+			})
+			continue
+		}
+		walkMap(c, mask, func(parent mapstr.M, key string) {
+			parent[key] = "*"
+		})
+	}
+	return c.String()
+}
+
+// cloneMap is an enhanced version of mapstr.M.Clone that handles cloning arrays
+// within objects. Nested arrays are not handled.
+func cloneMap(dst, src mapstr.M) {
+	for k, v := range src {
+		switch v := v.(type) {
+		case mapstr.M:
+			d := make(mapstr.M, len(v))
+			dst[k] = d
+			cloneMap(d, v)
+		case map[string]interface{}:
+			d := make(map[string]interface{}, len(v))
+			dst[k] = d
+			cloneMap(d, v)
+		case []mapstr.M:
+			a := make([]mapstr.M, 0, len(v))
+			for _, m := range v {
+				d := make(mapstr.M, len(m))
+				cloneMap(d, m)
+				a = append(a, d)
+			}
+			dst[k] = a
+		case []map[string]interface{}:
+			a := make([]map[string]interface{}, 0, len(v))
+			for _, m := range v {
+				d := make(map[string]interface{}, len(m))
+				cloneMap(d, m)
+				a = append(a, d)
+			}
+			dst[k] = a
+		default:
+			dst[k] = v
+		}
+	}
+}
+
+// walkMap walks to all ends of the provided path in m and applies fn to the
+// final element of each walk. Nested arrays are not handled.
+func walkMap(m mapstr.M, path string, fn func(parent mapstr.M, key string)) {
+	key, rest, more := strings.Cut(path, ".")
+	v, ok := m[key]
+	if !ok {
+		return
+	}
+	if !more {
+		fn(m, key)
+		return
+	}
+	switch v := v.(type) {
+	case mapstr.M:
+		walkMap(v, rest, fn)
+	case map[string]interface{}:
+		walkMap(v, rest, fn)
+	case []mapstr.M:
+		for _, m := range v {
+			walkMap(m, rest, fn)
+		}
+	case []map[string]interface{}:
+		for _, m := range v {
+			walkMap(m, rest, fn)
+		}
+	case []interface{}:
+		for _, v := range v {
+			switch m := v.(type) {
+			case mapstr.M:
+				walkMap(m, rest, fn)
+			case map[string]interface{}:
+				walkMap(m, rest, fn)
+			}
+		}
+	}
 }

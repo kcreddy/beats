@@ -128,6 +128,18 @@ func newBeater(b *beat.Beat, plugins PluginFactory, rawConfig *conf.C) (beat.Bea
 		}
 	}
 
+	if b.Manager != nil {
+		b.Manager.RegisterDiagnosticHook("input_metrics", "Metrics from active inputs.",
+			"input_metrics.json", "application/json", func() []byte {
+				data, err := inputmon.MetricSnapshotJSON()
+				if err != nil {
+					logp.L().Warnw("Failed to collect input metric snapshot for Agent diagnostics.", "error", err)
+					return []byte(err.Error())
+				}
+				return data
+			})
+	}
+
 	// Add inputs created by the modules
 	config.Inputs = append(config.Inputs, moduleInputs...)
 
@@ -190,9 +202,9 @@ func (fb *Filebeat) setupPipelineLoaderCallback(b *beat.Beat) error {
 		modulesFactory := fileset.NewSetupFactory(b.Info, pipelineLoaderFactory, enableAllFilesets)
 		if fb.config.ConfigModules.Enabled() {
 			if enableAllFilesets {
-				//All module configs need to be loaded to enable all the filesets
-				//contained in the modules.  The default glob just loads the enabled
-				//ones.  Switching the glob pattern from *.yml to * achieves this.
+				// All module configs need to be loaded to enable all the filesets
+				// contained in the modules.  The default glob just loads the enabled
+				// ones.  Switching the glob pattern from *.yml to * achieves this.
 				origPath, _ := fb.config.ConfigModules.String("path", -1)
 				newPath := strings.TrimSuffix(origPath, ".yml")
 				_ = fb.config.ConfigModules.SetString("path", -1, newPath)
@@ -440,7 +452,17 @@ func (fb *Filebeat) Run(b *beat.Beat) error {
 	}
 
 	// Stop the manager and stop the connection to any dependent services.
-	b.Manager.Stop()
+	// The Manager started to have a working implementation when
+	// https://github.com/elastic/beats/pull/34416 was merged.
+	// This is intended to enable TLS certificates reload on a long
+	// running Beat.
+	//
+	// However calling b.Manager.Stop() here messes up the behavior of the
+	// --once flag because it makes Filebeat exit early.
+	// So if --once is passed, we don't call b.Manager.Stop().
+	if !*once {
+		b.Manager.Stop()
+	}
 
 	return nil
 }

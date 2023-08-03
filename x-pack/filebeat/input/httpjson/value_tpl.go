@@ -66,6 +66,8 @@ func (t *valueTpl) Unpack(in string) error {
 			"hmacBase64":          hmacStringBase64,
 			"join":                join,
 			"toJSON":              toJSON,
+			"max":                 max,
+			"min":                 min,
 			"mul":                 mul,
 			"now":                 now,
 			"parseDate":           parseDate,
@@ -228,7 +230,7 @@ func parseTimestampNano(ns int64) time.Time {
 	return time.Unix(0, ns).UTC()
 }
 
-var regexpLinkRel = regexp.MustCompile(`<(.*)>;.*\srel\="?([^;"]*)`)
+var regexpLinkRel = regexp.MustCompile(`<(.*)>.*;\s*rel\=("[^"]*"|[^"][^;]*[^"])`)
 
 func getMatchLink(rel string, linksSplit []string) string {
 	for _, link := range linksSplit {
@@ -241,7 +243,11 @@ func getMatchLink(rel string, linksSplit []string) string {
 			continue
 		}
 
-		if matches[2] != rel {
+		linkRel := matches[2]
+		if len(linkRel) > 1 && linkRel[0] == '"' { // We can only have a leading quote if we also have a separate trailing quote.
+			linkRel = linkRel[1 : len(linkRel)-1]
+		}
+		if linkRel != rel {
 			continue
 		}
 
@@ -289,6 +295,32 @@ func mul(a, b int64) int64 {
 
 func div(a, b int64) int64 {
 	return a / b
+}
+
+func min(arg1, arg2 reflect.Value) (interface{}, error) {
+	lessThan, err := lt(arg1, arg2)
+	if err != nil {
+		return nil, err
+	}
+
+	// arg1 is < arg2.
+	if lessThan {
+		return arg1.Interface(), nil
+	}
+	return arg2.Interface(), nil
+}
+
+func max(arg1, arg2 reflect.Value) (interface{}, error) {
+	lessThan, err := lt(arg1, arg2)
+	if err != nil {
+		return nil, err
+	}
+
+	// arg1 is < arg2.
+	if lessThan {
+		return arg2.Interface(), nil
+	}
+	return arg1.Interface(), nil
 }
 
 func base64Encode(values ...string) string {

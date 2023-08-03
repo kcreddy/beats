@@ -121,7 +121,13 @@ pipeline {
             expression { return env.IS_BRANCH_AVAILABLE == "true" }
           }
           steps {
-            runReleaseManager(type: 'snapshot', outputFile: env.DRA_OUTPUT)
+            // retryWithSleep and withNode can be remove once https://github.com/elastic/release-eng/issues/456
+            // (internal only) is fixed.
+            retryWithSleep(retries: 3, seconds: 5, backoff: true) {
+              withNode(labels: 'ubuntu-22 && immutable', forceWorkspace: true) {
+                runReleaseManager(type: 'snapshot', outputFile: env.DRA_OUTPUT)
+              }
+            }
           }
           post {
             failure {
@@ -144,7 +150,13 @@ pipeline {
             }
           }
           steps {
-            runReleaseManager(type: 'staging', outputFile: env.DRA_OUTPUT)
+            // retryWithSleep and withNode can be remove once https://github.com/elastic/release-eng/issues/456
+            // (internal only) is fixed.
+            retryWithSleep(retries: 3, seconds: 5, backoff: true) {
+              withNode(labels: 'ubuntu-22 && immutable', forceWorkspace: true) {
+                runReleaseManager(type: 'staging', outputFile: env.DRA_OUTPUT)
+              }
+            }
           }
           post {
             failure {
@@ -162,7 +174,7 @@ pipeline {
                     text: """\
                     ## To be consumed by the beats-tester pipeline
                     COMMIT=${env.GIT_BASE_COMMIT}
-                    BEATS_URL_BASE=https://storage.googleapis.com/${env.JOB_GCS_BUCKET}/commits/${env.GIT_BASE_COMMIT}
+                    BEATS_URL_BASE=https://storage.googleapis.com/${env.JOB_GCS_BUCKET}/${env.REPO}/commits/${env.GIT_BASE_COMMIT}
                     VERSION=${env.BEAT_VERSION}-SNAPSHOT""".stripIndent()) // stripIdent() requires '''/
           archiveArtifacts artifacts: 'beats-tester.properties'
         }
@@ -261,7 +273,7 @@ def generateSteps() {
 
 def generateArmStep(beat) {
   return {
-    withNode(labels: 'arm') {
+    withNode(labels: 'ubuntu-2204-aarch64') {
       withEnv(["HOME=${env.WORKSPACE}", 'PLATFORMS=linux/arm64','PACKAGES=docker', "BEATS_FOLDER=${beat}"]) {
         withGithubNotify(context: "Packaging Arm ${beat}") {
           deleteDir()
@@ -316,7 +328,6 @@ def linuxPlatforms() {
   return [
             '+all',
             'linux/amd64',
-            'linux/386',
             'linux/arm64',
             // armv7 packaging isn't working, and we don't currently
             // need it for release. Do not re-enable it without
@@ -329,7 +340,6 @@ def linuxPlatforms() {
             //'linux/mips64',
             //'linux/s390x',
             'windows/amd64',
-            'windows/386',
             'darwin/amd64',
             'darwin/arm64'
           ].join(' ')

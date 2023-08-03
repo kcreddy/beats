@@ -47,8 +47,11 @@ func newState() *state {
 	}
 }
 
-// save, saves/updates the current state for cursor checkpoint
-func (s *state) save(name string, lastModifiedOn time.Time) {
+// saveForTx updates and returns the current state checkpoint, locks the state
+// and returns an unlock function, done. The caller must call done when
+// s and cp are no longer needed in a locked state. done may not be called
+// more than once.
+func (s *state) saveForTx(name string, lastModifiedOn time.Time) (cp *Checkpoint, done func()) {
 	s.mu.Lock()
 	delete(s.cp.LastProcessedOffset, name)
 	delete(s.cp.IsRootArray, name)
@@ -68,17 +71,24 @@ func (s *state) save(name string, lastModifiedOn time.Time) {
 		// clear entry if this is a failed job
 		delete(s.cp.FailedJobs, name)
 	}
-	s.mu.Unlock()
+	return s.cp, func() { s.mu.Unlock() }
+}
+
+// savePartialForTx partially updates and returns the current state checkpoint, locks the state
+// and returns an unlock function, done. The caller must call done when
+// s and cp are no longer needed in a locked state. done may not be called
+// more than once.
+func (s *state) savePartialForTx(name string, offset int64) (cp *Checkpoint, done func()) {
+	s.mu.Lock()
+	s.cp.LastProcessedOffset[name] = offset
+	return s.cp, func() { s.mu.Unlock() }
 }
 
 // setRootArray, sets boolean true for objects that have their roots defined as an array type
 func (s *state) setRootArray(name string) {
+	s.mu.Lock()
 	s.cp.IsRootArray[name] = true
-}
-
-// savePartial, partially saves/updates the current state for cursor checkpoint
-func (s *state) savePartial(name string, offset int64) {
-	s.cp.LastProcessedOffset[name] = offset
+	s.mu.Unlock()
 }
 
 // updateFailedJobs, adds a job name to a failedJobs map, which helps
@@ -87,11 +97,11 @@ func (s *state) savePartial(name string, offset int64) {
 // A failed job will be re-tried a maximum of 3 times after which the
 // entry is removed from the map
 func (s *state) updateFailedJobs(jobName string) {
+	s.mu.Lock()
 	// we do not store partially processed jobs as failed jobs
 	if _, ok := s.cp.LastProcessedOffset[jobName]; ok {
 		return
 	}
-	s.mu.Lock()
 	s.cp.FailedJobs[jobName]++
 	if s.cp.FailedJobs[jobName] > maxFailedJobRetries {
 		delete(s.cp.FailedJobs, jobName)
@@ -100,7 +110,18 @@ func (s *state) updateFailedJobs(jobName string) {
 }
 
 // setCheckpoint, sets checkpoint from source to current state instance
+// If for some reason the current state is empty, assigns new states as
+// a fail safe mechanism
 func (s *state) setCheckpoint(chkpt *Checkpoint) {
+	if chkpt.FailedJobs == nil {
+		chkpt.FailedJobs = make(map[string]int)
+	}
+	if chkpt.IsRootArray == nil {
+		chkpt.IsRootArray = make(map[string]bool)
+	}
+	if chkpt.LastProcessedOffset == nil {
+		chkpt.LastProcessedOffset = make(map[string]int64)
+	}
 	s.cp = chkpt
 }
 
