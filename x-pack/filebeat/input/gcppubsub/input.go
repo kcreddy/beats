@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math/rand"
 	"sync"
 	"time"
 
@@ -39,6 +40,12 @@ const (
 	// retryInterval is the minimum duration between pub/sub client retries.
 	retryInterval = 30 * time.Second
 )
+
+// var pool = sync.Pool{
+// 	New: func() interface{} {
+// 		s := channel.Outleter{}
+// 		return &s
+// 	}}
 
 func init() {
 	err := input.Register(inputName, NewInput)
@@ -77,8 +84,8 @@ type pubsubInput struct {
 	config
 
 	log      *logp.Logger
-	outlet   channel.Outleter // Output of received pubsub messages.
-	inputCtx context.Context  // Wraps the Done channel from parent input.Context.
+	outlets  []channel.Outleter // Output of received pubsub messages.
+	inputCtx context.Context    // Wraps the Done channel from parent input.Context.
 
 	workerCtx    context.Context    // Worker goroutine context. It's cancelled when the input stops or the worker exits.
 	workerCancel context.CancelFunc // Used to signal that the worker should stop.
@@ -137,31 +144,35 @@ func NewInput(cfg *conf.C, connector channel.Connector, inputContext input.Conte
 	}
 
 	// Build outlet for events.
-	in.outlet, err = connector.ConnectWith(cfg, beat.ClientConfig{
-		EventListener: acker.ConnectionOnly(
-			acker.EventPrivateReporter(func(_ int, privates []interface{}) {
-				for _, priv := range privates {
-					if msg, ok := priv.(*pubsub.Message); ok {
-						msg.Ack()
+	numOutlets := 2
+	for i := 1; i <= numOutlets; i++ {
+		outlet, err := connector.ConnectWith(cfg, beat.ClientConfig{
+			EventListener: acker.ConnectionOnly(
+				acker.EventPrivateReporter(func(_ int, privates []interface{}) {
+					for _, priv := range privates {
+						if msg, ok := priv.(*pubsub.Message); ok {
+							msg.Ack()
 
-						in.metrics.ackedMessageCount.Inc()
-						in.metrics.bytesProcessedTotal.Add(uint64(len(msg.Data)))
-						in.metrics.processingTime.Update(time.Since(msg.PublishTime).Nanoseconds())
-					} else {
-						in.metrics.failedAckedMessageCount.Inc()
-						in.log.Error("Failed ACKing pub/sub event")
+							in.metrics.ackedMessageCount.Inc()
+							in.metrics.bytesProcessedTotal.Add(uint64(len(msg.Data)))
+							in.metrics.processingTime.Update(time.Since(msg.PublishTime).Nanoseconds())
+						} else {
+							in.metrics.failedAckedMessageCount.Inc()
+							in.log.Error("Failed ACKing pub/sub event")
+						}
 					}
-				}
-			}),
-		),
-		Processing: beat.ProcessingConfig{
-			// This input only produces events with basic types so normalization
-			// is not required.
-			EventNormalization: boolPtr(false),
-		},
-	})
-	if err != nil {
-		return nil, err
+				}),
+			),
+			Processing: beat.ProcessingConfig{
+				// This input only produces events with basic types so normalization
+				// is not required.
+				EventNormalization: boolPtr(false),
+			},
+		})
+		if err != nil {
+			return nil, err
+		}
+		in.outlets = append(in.outlets, outlet)
 	}
 	in.log.Info("Initialized GCP Pub/Sub input.")
 	return in, nil
@@ -226,7 +237,7 @@ func (in *pubsubInput) run() error {
 	// Start receiving messages.
 	topicID := makeTopicID(in.ProjectID, in.Topic)
 	return sub.Receive(ctx, func(ctx context.Context, msg *pubsub.Message) {
-		if ok := in.outlet.OnEvent(makeEvent(topicID, msg)); !ok {
+		if ok := in.outlets[rand.Intn(len(in.outlets))].OnEvent(makeEvent(topicID, msg)); !ok {
 			msg.Nack()
 			in.metrics.nackedMessageCount.Inc()
 			in.log.Debug("OnEvent returned false. Stopping input worker.")
