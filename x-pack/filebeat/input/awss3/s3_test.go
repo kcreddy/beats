@@ -15,6 +15,8 @@ import (
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/require"
 
+	"github.com/elastic/beats/v7/libbeat/statestore"
+	"github.com/elastic/beats/v7/libbeat/statestore/storetest"
 	"github.com/elastic/elastic-agent-libs/logp"
 )
 
@@ -126,33 +128,22 @@ func TestS3Poller(t *testing.T) {
 			GetObject(gomock.Any(), gomock.Eq(bucket), gomock.Eq("2024-02-08T08:35:00+00:02.json.gz")).
 			Return(nil, errFakeConnectivityFailure)
 
-		s3ObjProc := newS3ObjectProcessorFactory(logp.NewLogger(inputName), nil, mockAPI, nil, backupConfig{})
-		states, err := newStates(nil, store)
+		s3ObjProc := newS3ObjectProcessorFactory(logp.NewLogger(inputName), nil, mockAPI, nil, backupConfig{}, numberOfWorkers)
+		states, err := newStates(inputCtx, store)
 		require.NoError(t, err, "states creation must succeed")
-		poller := &s3PollerInput{
-			log: logp.NewLogger(inputName),
-			config: config{
-				NumberOfWorkers:    numberOfWorkers,
-				BucketListInterval: pollInterval,
-				BucketARN:          bucket,
-				BucketListPrefix:   "key",
-				RegionName:         "region",
-			},
-			s3:              mockAPI,
-			client:          mockPublisher,
-			s3ObjectHandler: s3ObjProc,
-			states:          states,
-			provider:        "provider",
-			metrics:         newInputMetrics("", nil, 0),
-		}
-		poller.runPoll(ctx)
+		receiver := newS3Poller(logp.NewLogger(inputName), nil, mockAPI, mockPublisher, s3ObjProc, states, bucket, "key", "region", "provider", numberOfWorkers, pollInterval)
+		require.Error(t, context.DeadlineExceeded, receiver.Poll(ctx))
 	})
 
 	t.Run("restart bucket scan after paging errors", func(t *testing.T) {
 		// Change the restart limit to 2 consecutive errors, so the test doesn't
 		// take too long to run
 		readerLoopMaxCircuitBreaker = 2
-		store := openTestStatestore()
+		storeReg := statestore.NewRegistry(storetest.NewMemoryStoreBackend())
+		store, err := storeReg.Get("test")
+		if err != nil {
+			t.Fatalf("Failed to access store: %v", err)
+		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), testTimeout+pollInterval)
 		defer cancel()
@@ -264,26 +255,11 @@ func TestS3Poller(t *testing.T) {
 			GetObject(gomock.Any(), gomock.Eq(bucket), gomock.Eq("key5")).
 			Return(nil, errFakeConnectivityFailure)
 
-		s3ObjProc := newS3ObjectProcessorFactory(logp.NewLogger(inputName), nil, mockS3, nil, backupConfig{})
-		states, err := newStates(nil, store)
+		s3ObjProc := newS3ObjectProcessorFactory(logp.NewLogger(inputName), nil, mockAPI, nil, backupConfig{}, numberOfWorkers)
+		states, err := newStates(inputCtx, store)
 		require.NoError(t, err, "states creation must succeed")
-		poller := &s3PollerInput{
-			log: logp.NewLogger(inputName),
-			config: config{
-				NumberOfWorkers:    numberOfWorkers,
-				BucketListInterval: pollInterval,
-				BucketARN:          bucket,
-				BucketListPrefix:   "key",
-				RegionName:         "region",
-			},
-			s3:              mockS3,
-			client:          mockPublisher,
-			s3ObjectHandler: s3ObjProc,
-			states:          states,
-			provider:        "provider",
-			metrics:         newInputMetrics("", nil, 0),
-		}
-		poller.run(ctx)
+		receiver := newS3Poller(logp.NewLogger(inputName), nil, mockAPI, mockPublisher, s3ObjProc, states, bucket, "key", "region", "provider", numberOfWorkers, pollInterval)
+		require.Error(t, context.DeadlineExceeded, receiver.Poll(ctx))
 	})
 }
 

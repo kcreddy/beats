@@ -5,11 +5,10 @@
 package awss3
 
 import (
-	"fmt"
 	"strings"
 	"sync"
 
-	"github.com/elastic/beats/v7/filebeat/beater"
+	v2 "github.com/elastic/beats/v7/filebeat/input/v2"
 	"github.com/elastic/beats/v7/libbeat/statestore"
 	"github.com/elastic/elastic-agent-libs/logp"
 )
@@ -19,6 +18,8 @@ const awsS3ObjectStatePrefix = "filebeat::aws-s3::state::"
 // states handles list of s3 object state. One must use newStates to instantiate a
 // file states registry. Using the zero-value is not safe.
 type states struct {
+	log *logp.Logger
+
 	// Completed S3 object states, indexed by state ID.
 	// statesLock must be held to access states.
 	states     map[string]state
@@ -31,21 +32,13 @@ type states struct {
 }
 
 // newStates generates a new states registry.
-func newStates(log *logp.Logger, stateStore beater.StateStore) (*states, error) {
-	store, err := stateStore.Access()
-	if err != nil {
-		return nil, fmt.Errorf("can't access persistent store: %w", err)
-	}
-
-	stateTable, err := loadS3StatesFromRegistry(log, store)
-	if err != nil {
-		return nil, fmt.Errorf("loading S3 input state: %w", err)
-	}
-
-	return &states{
+func newStates(ctx v2.Context, store *statestore.Store) (*states, error) {
+	states := &states{
+		log:    ctx.Logger.Named("states"),
+		states: map[string]state{},
 		store:  store,
-		states: stateTable,
-	}, nil
+	}
+	return states, states.loadFromRegistry()
 }
 
 func (s *states) IsProcessed(state state) bool {
@@ -56,7 +49,8 @@ func (s *states) IsProcessed(state state) bool {
 	return ok
 }
 
-func (s *states) AddState(state state) error {
+func (s *states) AddState(state state) {
+
 	id := state.ID()
 	// Update in-memory copy
 	s.statesLock.Lock()
@@ -65,23 +59,18 @@ func (s *states) AddState(state state) error {
 
 	// Persist to the registry
 	s.storeLock.Lock()
-	defer s.storeLock.Unlock()
 	key := awsS3ObjectStatePrefix + id
 	if err := s.store.Set(key, state); err != nil {
-		return err
+		s.log.Errorw("Failed to write states to the registry", "error", err)
 	}
-	return nil
-}
-
-func (s *states) Close() {
-	s.storeLock.Lock()
-	s.store.Close()
 	s.storeLock.Unlock()
 }
 
-func loadS3StatesFromRegistry(log *logp.Logger, store *statestore.Store) (map[string]state, error) {
-	stateTable := map[string]state{}
-	err := store.Each(func(key string, dec statestore.ValueDecoder) (bool, error) {
+func (s *states) loadFromRegistry() error {
+	states := map[string]state{}
+
+	s.storeLock.Lock()
+	err := s.store.Each(func(key string, dec statestore.ValueDecoder) (bool, error) {
 		if !strings.HasPrefix(key, awsS3ObjectStatePrefix) {
 			return true, nil
 		}
@@ -90,9 +79,8 @@ func loadS3StatesFromRegistry(log *logp.Logger, store *statestore.Store) (map[st
 		var st state
 		if err := dec.Decode(&st); err != nil {
 			// Skip this key but continue iteration
-			if log != nil {
-				log.Warnf("invalid S3 state loading object key %v", key)
-			}
+			s.log.Warnf("invalid S3 state loading object key %v", key)
+			//nolint:nilerr // One bad object shouldn't stop iteration
 			return true, nil
 		}
 		if !st.Stored && !st.Failed {
@@ -103,11 +91,17 @@ func loadS3StatesFromRegistry(log *logp.Logger, store *statestore.Store) (map[st
 			return true, nil
 		}
 
-		stateTable[st.ID()] = st
+		states[st.ID()] = st
 		return true, nil
 	})
+	s.storeLock.Unlock()
 	if err != nil {
 		return nil, err
 	}
-	return stateTable, nil
+
+	s.statesLock.Lock()
+	s.states = states
+	s.statesLock.Unlock()
+
+	return nil
 }

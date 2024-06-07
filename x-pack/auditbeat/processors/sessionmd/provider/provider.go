@@ -12,5 +12,5 @@ import (
 
 // SyncDB should ensure the DB is in a state to handle the event before returning.
 type Provider interface {
-	SyncDB(event *beat.Event, pid uint32) error
+	UpdateDB(*beat.Event, uint32) error
 }

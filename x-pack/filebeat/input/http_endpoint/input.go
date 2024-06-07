@@ -111,15 +111,7 @@ func (e *httpEndpoint) Run(ctx v2.Context, pipeline beat.Pipeline) error {
 		e.config.Tracer.Filename = strings.ReplaceAll(e.config.Tracer.Filename, "*", id)
 	}
 
-	client, err := pipeline.ConnectWith(beat.ClientConfig{
-		EventListener: newEventACKHandler(),
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create pipeline client: %w", err)
-	}
-	defer client.Close()
-
-	err = servers.serve(ctx, e, client.Publish, metrics)
+	err := servers.serve(ctx, e, publisher, metrics)
 	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("unable to start server due to error: %w", err)
 	}
