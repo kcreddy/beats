@@ -237,7 +237,8 @@ func (in *pubsubInput) run() error {
 	// Start receiving messages.
 	topicID := makeTopicID(in.ProjectID, in.Topic)
 	return sub.Receive(ctx, func(ctx context.Context, msg *pubsub.Message) {
-		if ok := in.outlets[rand.Intn(len(in.outlets))].OnEvent(makeEvent(topicID, msg)); !ok {
+		r := rand.New(rand.NewSource(time.Now().UnixNano()))
+		if ok := in.outlets[r.Intn(len(in.outlets))].OnEvent(makeEvent(topicID, msg)); !ok {
 			msg.Nack()
 			in.metrics.nackedMessageCount.Inc()
 			in.log.Debug("OnEvent returned false. Stopping input worker.")
