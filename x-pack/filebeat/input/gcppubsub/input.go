@@ -144,7 +144,7 @@ func NewInput(cfg *conf.C, connector channel.Connector, inputContext input.Conte
 	}
 
 	// Build outlet for events.
-	numOutlets := 2
+	numOutlets := in.Outlet.NumPipelines
 	for i := 1; i <= numOutlets; i++ {
 		outlet, err := connector.ConnectWith(cfg, beat.ClientConfig{
 			EventListener: acker.ConnectionOnly(
