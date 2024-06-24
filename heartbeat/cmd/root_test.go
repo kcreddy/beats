@@ -15,26 +15,26 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package eventlog
+package cmd
 
 import (
-	"errors"
+	"fmt"
+	"testing"
 
-	win "github.com/elastic/beats/v7/winlogbeat/sys/wineventlog"
+	"github.com/stretchr/testify/assert"
+
+	"github.com/elastic/beats/v7/heartbeat/monitors/plugin"
 )
 
-// IsRecoverable returns a boolean indicating whether the error represents
-// a condition where the Windows Event Log session can be recovered through a
-// reopening of the handle (Close, Open).
-//
-//nolint:errorlint // These are never wrapped.
-func IsRecoverable(err error) bool {
-	return err == win.ERROR_INVALID_HANDLE || err == win.RPC_S_SERVER_UNAVAILABLE ||
-		err == win.RPC_S_CALL_CANCELLED || err == win.ERROR_EVT_QUERY_RESULT_STALE ||
-		err == win.ERROR_INVALID_PARAMETER
-}
-
-// IsChannelNotFound returns true if the error indicates the channel was not found.
-func IsChannelNotFound(err error) bool {
-	return errors.Is(err, win.ERROR_EVT_CHANNEL_NOT_FOUND)
+// Test all required plugins are exported by this module, since it's the
+// one imported by agentbeat: https://github.com/elastic/beats/pull/39818
+func TestRootCmdPlugins(t *testing.T) {
+	t.Parallel()
+	plugins := []string{"http", "tcp", "icmp"}
+	for _, p := range plugins {
+		t.Run(fmt.Sprintf("%s plugin", p), func(t *testing.T) {
+			_, found := plugin.GlobalPluginsReg.Get(p)
+			assert.True(t, found)
+		})
+	}
 }
