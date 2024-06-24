@@ -106,7 +106,6 @@ func loadS3StatesFromRegistry(log *logp.Logger, store *statestore.Store) (map[st
 		stateTable[st.ID()] = st
 		return true, nil
 	})
-	s.storeLock.Unlock()
 	if err != nil {
 		return nil, err
 	}

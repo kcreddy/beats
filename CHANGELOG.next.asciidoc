@@ -100,6 +100,7 @@ https://github.com/elastic/beats/compare/v8.8.1\...main[Check the HEAD diff]
 
 
 *Filebeat*
+
 - [Gcs Input] - Added missing locks for safe concurrency {pull}34914[34914]
 - Fix the ignore_inactive option being ignored in Filebeat's filestream input {pull}34770[34770]
 - Fix TestMultiEventForEOFRetryHandlerInput unit test of CometD input {pull}34903[34903]
@@ -114,15 +115,6 @@ https://github.com/elastic/beats/compare/v8.8.1\...main[Check the HEAD diff]
 - Added a fix for Crowdstrike pipeline handling process arrays {pull}36496[36496]
 - [threatintel] MISP pagination fixes {pull}37898[37898]
 - Fix file handle leak when handling errors in filestream {pull}37973[37973]
-
-*Heartbeat*
-
-- Fix panics when parsing dereferencing invalid parsed url. {pull}34702[34702]
-- Fix setuid root when running under cgroups v2. {pull}37794[37794]
-- Adjust State loader to only retry when response code status is 5xx {pull}37981[37981]
-- Reset prctl dumpable flag after cap drop. {pull}38269[38269]
-- Redact synthexec cmd output. {pull}39535[39535]
-- Fix import of browser plugin for agentbeat. {pull}39818[39818]
 - Fix a race condition that could crash Filebeat with a "negative WaitGroup counter" error {pull}38094[38094]
 - Prevent HTTPJSON holding response bodies between executions. {issue}35219[35219] {pull}38116[38116]
 - Fix "failed processing S3 event for object key" error on aws-s3 input when key contains the "+" character {issue}38012[38012] {pull}38125[38125]
@@ -196,9 +188,6 @@ https://github.com/elastic/beats/compare/v8.8.1\...main[Check the HEAD diff]
 - Beats will now connect to older Elasticsearch instances by default {pull}36884[36884]
 - Raise up logging level to warning when attempting to configure beats with unknown fields from autodiscovered events/environments
 - elasticsearch output now supports `idle_connection_timeout`. {issue}35616[35615] {pull}36843[36843]
-
-*Auditbeat*
-
 - Update to Go 1.21.11. {pull}39851[39851]
 - Enable early event encoding in the Elasticsearch output, improving cpu and memory use {pull}38572[38572]
 - The environment variable `BEATS_ADD_CLOUD_METADATA_PROVIDERS` overrides configured/default `add_cloud_metadata` providers {pull}38669[38669]
@@ -372,66 +361,3 @@ https://github.com/elastic/beats/compare/v8.8.1\...main[Check the HEAD diff]
 
 
 ==== Known Issues
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
