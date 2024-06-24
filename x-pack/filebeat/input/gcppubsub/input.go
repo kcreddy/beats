@@ -167,7 +167,7 @@ func NewInput(cfg *conf.C, connector channel.Connector, inputContext input.Conte
 			if err != nil {
 				return nil
 			}
-			return &outlet
+			return outlet
 		},
 	}
 
