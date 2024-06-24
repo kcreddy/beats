@@ -71,6 +71,7 @@ The list below covers the major changes between 7.0.0-rc2 and main only.
 
 ==== Bugfixes
 
+- Handle the starting of namespace and node watchers for metadata enrichment according to `add_resource_metadata` configuration.{pull}38762[38762]
 - Fix multiple metricbeat instances reporting same metrics when using autodiscover with provider kubernetes, and ensure leader elector is always running in autodiscover mode.{pull}38471[38471]
 - Fix how Prometheus histograms are calculated when percentiles are provide.{pull}36537[36537]
 - Stop using `mage:import` in community beats. This was ignoring the vendorized beats directory for some mage targets, using the code available in GOPATH, this causes inconsistencies and compilation problems if the version of the code in the GOPATH is different to the vendored one. Use of `mage:import` will continue to be unsupported in custom beats till beats is migrated to go modules, or mage supports vendored dependencies. {issue}13998[13998] {pull}14162[14162]
@@ -97,6 +98,10 @@ The list below covers the major changes between 7.0.0-rc2 and main only.
 - Fix copy arguments for strict aligned architectures. {pull}36976[36976]
 - Fix panic when more than 32767 pipeline clients are active. {issue}38197[38197] {pull}38556[38556]
 - Skip flakey metrics test on windows in filebeat httpjson input. {issue}39676[39676] {pull}39678[39678]
+- Fix flakey test on Windows 2022 in packetbeat/route. {issue}39698[39698] {pull}39822[39822]
+- Fix bug in minimum length for request trace logging. {pull}39834[39834]
+- Close connections properly in Filbeat's HTTPJSON input. {pull}39790[39790]
+- Add the Offset property to libbeat/reader.Message to store the total number of bytes read and discarded before generating the message. This enables inputs to accurately determine how much data has been read up to the message, using Message.Bytes + Message.Offset. {pull}39873[39873] {issue}39653[39653]
 
 ==== Added
 
@@ -188,6 +193,9 @@ The list below covers the major changes between 7.0.0-rc2 and main only.
 - Allow assignment of packetbeat protocols to interfaces. {issue}36574[36564] {pull}36852[36852]
 - Add Active Directory entity collector for Filebeat entity analytics. {pull}37854[37854]
 - Make logs for empty and small files less noisy when using fingerprint file identity in filestream. {pull}38421[38421]
+- Improve robustness and error reporting from packetbeat default route testing. {pull}39757[39757]
+- Move x-pack/filebeat/input/salesforce jwt import to v5. {pull}39823[39823]
+- Drop x-pack/filebeat/input dependency on github.com/lestrrat-go/jwx/v2. {pull}39968[39968]
 
 ==== Deprecated
 
